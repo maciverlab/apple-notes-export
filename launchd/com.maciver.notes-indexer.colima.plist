@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maciver.notes-indexer.colima</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/<you>/NotesIndex/run_with_terminal.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>14400</integer> <!-- Run every 4 hours -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/<you>/Library/Logs/notes-indexer-colima.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/<you>/Library/Logs/notes-indexer-colima.err</string>
+</dict>
+</plist>

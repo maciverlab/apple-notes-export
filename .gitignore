@@ -1,0 +1,16 @@
+# WHITELIST, deliberately. ~/NotesIndex holds the full personal Apple Notes
+# database (NoteStore.sqlite, ~112MB) and every exported note under output/.
+# Ignore everything by default so no note content can ever be committed by
+# accident; add new tracked files explicitly below.
+
+*
+
+!.gitignore
+!README.md
+!run_combined_export.sh
+!run_with_terminal.sh
+!test_time_logic.sh
+!docs/
+!docs/*.md
+!launchd/
+!launchd/*.plist
