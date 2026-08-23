@@ -104,6 +104,39 @@ You should see:
 - Current context: `colima`
 - Docker socket: `~/.colima/default/docker.sock`
 
+## 📦 Obtaining the parser image
+
+The parser is [`apple_cloud_notes_parser`](https://github.com/threeplanetssoftware/apple_cloud_notes_parser),
+run as a prebuilt container from GitHub Container Registry. There is nothing to
+install: the `docker run` in the export script references the image **by digest**,
+so Docker pulls it automatically the first time it is needed.
+
+Two reasons to pull it once by hand before the first scheduled run:
+
+- It is about **500 MB**. Left to the schedule, that download happens inside the
+  weekend export window, at whatever hour `launchd` fires. If the network or
+  `ghcr.io` is unavailable, the run fails and raises the critical alert.
+- Pulling it deliberately lets you confirm the digest *before* a container is
+  handed a full copy of your Notes database. See the security notes below.
+
+```bash
+docker pull ghcr.io/threeplanetssoftware/apple_cloud_notes_parser@sha256:63e2523be8aa23e06de34a6c1aaa112e004a01599bc602c4f1657949d186131d
+```
+
+Verify what you got:
+
+```bash
+docker images --digests | grep apple_cloud_notes_parser
+```
+
+The digest shown must match the one in `run_combined_export.sh`. Docker refuses a
+mismatch, so a successful pull is itself the check — but confirm the script and
+the pull reference the same digest, not merely that *some* image is present.
+
+The pinned image never changes on its own. Moving to a newer build is a
+deliberate, testable step — see *Update the parser container* under Maintenance
+Notes before doing it.
+
 ## 🔧 Export Script
 
 📄 `~/NotesIndex/run_combined_export.sh`
@@ -561,10 +594,57 @@ colima stop --force && colima start --runtime docker --memory 8 --cpu 4
   colima start
   ```
 
-- Update parser container:
+- Update the parser container — **only if you actually want a newer build.**
+  The script pins the image by digest, so it runs identical bits every time and
+  will never change on its own. That is the point: a working export stays
+  working. Pulling the `:latest` tag changes nothing about what runs; only the
+  digest in `run_combined_export.sh` does.
+
+  **Updating is a change with consequences, not routine housekeeping.** A newer
+  parser can rearrange the output layout or JSON fields that anything downstream
+  reads, change how it rewrites the copied database, guess a different Notes
+  version, or need more memory than the one you tested — and memory is exactly
+  what broke this export silently for months (see *Status & change history*).
+  Have a reason: a bug fix you need, a format you want, or a security fix.
+  "It is newer" is not a reason.
+
+  To check whether a newer build exists:
+
   ```bash
-  docker pull ghcr.io/threeplanetssoftware/apple_cloud_notes_parser
+  docker pull ghcr.io/threeplanetssoftware/apple_cloud_notes_parser:latest
+  docker inspect --format '{{index .RepoDigests 0}}' \
+    ghcr.io/threeplanetssoftware/apple_cloud_notes_parser:latest
   ```
+
+  If that digest matches the one already in `run_combined_export.sh`, upstream
+  has not published anything new and there is nothing to do. If it differs and
+  you have decided you want it:
+
+  1. **Record the current digest before changing it.** Digests are immutable, so
+     the old one stays your rollback for as long as upstream keeps that image
+     published.
+  2. Replace the digest in the `docker run` line of `run_combined_export.sh`.
+  3. Run a manual export: `~/NotesIndex/run_with_terminal.sh`.
+  4. Check the results against the previous run *before* leaving it on the
+     schedule — a clean exit alone is not enough:
+
+     ```bash
+     grep "Docker completed OK"        ~/Library/Logs/notes-export-full.log | tail -2
+     grep "Updated AppleNoteStore"     ~/Library/Logs/notes-export-full.log | tail -2
+     grep "Peak container memory"      ~/Library/Logs/notes-export-full.log | tail -2
+     ls -la ~/NotesIndex/output/notes_rip/json/
+     ```
+
+     The note and folder counts should be close to the last good run (a sudden
+     drop means notes were silently missed, not that they vanished); peak memory
+     should not have jumped; the JSON directory should exist and be non-empty;
+     and anything you have built on top of the export should still read it.
+
+  5. If any of that looks wrong, put the old digest back and run again.
+
+  The pin does not follow upstream and nothing warns you when upstream moves.
+  That is deliberate — but it also means an upstream security fix will not reach
+  you on its own, so the check is worth making about once a year.
 
 - Check failures:
   ```bash
