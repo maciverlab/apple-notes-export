@@ -19,7 +19,35 @@ It is designed to be:
 
 ## ⚠️ Status & change history
 
-**Last verified working: 2026-08-22** (2904 notes, 54 folders).
+**Last verified working: 2026-09-26** (2938 notes, 54 folders).
+
+### 2026-09-26 — macOS "Golden Gate" upgrade broke access while locked/asleep
+After updating to macOS Golden Gate, the scheduled 1:30am/5:30am weekend runs failed at the
+`cp` of `NoteStore.sqlite` with `authorization denied` / `Operation not permitted`, while
+manually running the export in an already-unlocked session succeeded every time — including
+through the identical Terminal+AppleScript wrapper. The power log confirmed the display was
+off through both failure windows.
+
+Root cause: Full Disk Access granted to **Terminal.app** no longer covers a window Terminal
+opens via an AppleScript Apple Event while the screen is locked or asleep. The Apple Event
+itself succeeds and the script runs, but the protected file read is denied until there is an
+active, unlocked session — and with `displaysleep` at 5 minutes, the screen is reliably off
+by the time `launchd`'s 4-hourly interval fires overnight.
+
+Fix: **Full Disk Access is now granted directly to `run_combined_export.sh`** (added by path
+in System Settings, not via Terminal), and the `launchd` job calls that script directly. See
+*Full Disk Access is granted to the script, not Terminal* under Required Permissions, and the
+`Operation not permitted` entry under Troubleshooting. `run_with_terminal.sh` is no longer
+part of the permission chain and is no longer referenced by the LaunchAgent; it is kept only
+as an optional manual helper that opens the export in a visible window.
+
+Also worth knowing: this was on top of two other post-upgrade issues seen the same week —
+Colima came back from the upgrade in a `Broken` state (`vz driver is running but host agent
+is not`), fixed with `colima stop --force && colima start --runtime docker --memory 8 --cpu
+4`; and Full Disk Access itself needed re-granting to Terminal once (toggle it off/on in
+System Settings, fully quit Terminal with Cmd-Q, then retry) before the locked-screen issue
+above was even visible. If you hit this after an OS upgrade, check all three: Full Disk
+Access grant, Colima VM state, and screen-lock timing.
 
 ### 2026-08-22 — the export had been failing silently for months
 Three compounding bugs, all now fixed. Read this before changing anything:
@@ -44,7 +72,7 @@ failure alerts (notification + critical modal).
 The gates are a weekend window (Sat 00:00 → Mon 04:59) plus a 5.25-day cooldown, with **no
 catch-up logic**. On one occasion the Mac was powered off for over a week, so that
 weekend was missed entirely and 13 days elapsed between exports. If you are away for a weekend, expect a
-gap and run it manually via `run_with_terminal.sh`.
+gap and run it manually via `run_combined_export.sh` (or `run_with_terminal.sh` for a visible window).
 
 ### Growth / future OOM risk
 2429 notes (May 2025) → 2904 notes (Aug 2026), roughly 32 notes/month. At 8 GB there is
@@ -56,8 +84,8 @@ at ≥75% a WARNING telling you to raise the VM.
 
 ```bash
 ~/NotesIndex/
-├── run_combined_export.sh         # Main export script; checks if it is the weekend and has not been recently exported
-├── run_with_terminal.sh           # Wrapper so that full disk access is inherited
+├── run_combined_export.sh         # Main export script; has Full Disk Access granted directly; this is what launchd runs
+├── run_with_terminal.sh           # Legacy manual-run helper (visible Terminal window); not used by launchd, not needed for permissions
 ├── NoteStore.sqlite               # Copied Notes database (refreshed weekly after Friday 4am)
 ├── output/                        # Output folder for extracted HTML files
 ~/Library/Logs/
@@ -65,7 +93,7 @@ at ≥75% a WARNING telling you to raise the VM.
 ├── notes-indexer-colima.out      # Colima status log
 ~/Library/LaunchAgents/
 ├── com.maciver.notes-indexer.colima.plist  # LaunchAgent for calling
-run_with_terminal.sh periodically
+run_combined_export.sh directly, every 4 hours
 ├── com.maciver.colima.autostart.plist      # LaunchAgent for starting Colima on logging in
 ```
 
@@ -414,14 +442,17 @@ Make it executable:
 chmod +x ~/NotesIndex/run_combined_export.sh
 ```
 
-## Wrapper Script: `run_with_terminal.sh`
+## Wrapper Script: `run_with_terminal.sh` (legacy, optional)
+
+Full Disk Access is now granted directly to `run_combined_export.sh` (see *Required
+Permissions* below), and `launchd` calls that script directly. This wrapper is **not** part
+of the permission chain any more and is **not** referenced by the LaunchAgent. It is kept
+only so you can open the export in a visible Terminal window for a manual run:
 
 ```bash
 #!/bin/bash
-# This wrapper exists solely so the export inherits Terminal.app's Full Disk
-# Access, which is required to read the protected Apple Notes database.
-# Running run_combined_export.sh directly fails at the cp with
-# "Operation not permitted".
+# LEGACY / NOT USED BY launchd ANY MORE. See docs above and the Status & change
+# history entry for 2026-09-26 for why this stopped being how permissions work.
 /usr/bin/osascript -e "tell application \"Terminal\" to do script \"$HOME/NotesIndex/run_combined_export.sh; exit\""
 ```
 
@@ -448,7 +479,7 @@ chmod +x ~/NotesIndex/run_with_terminal.sh
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/<you>/NotesIndex/run_with_terminal.sh</string>
+        <string>/Users/<you>/NotesIndex/run_combined_export.sh</string>
     </array>
 
     <key>StartInterval</key>
@@ -503,28 +534,41 @@ adopt this setup, rename them to your own namespace — the label must match the
 
 ## 🛡️ Required Permissions
 
-- **Terminal.app** must be granted Full Disk Access:
-  - System Settings ▸ Privacy & Security ▸ Full Disk Access ▸ ✅ Terminal
+- **`run_combined_export.sh` must be granted Full Disk Access directly** (not Terminal.app):
+  - System Settings ▸ Privacy & Security ▸ Full Disk Access ▸ **+** ▸ navigate to
+    `~/NotesIndex/run_combined_export.sh` (Cmd+Shift+G in the file picker to type the path,
+    since it isn't an app) ▸ add it ▸ toggle it **on**.
+  - This must be redone if the script is ever moved or replaced with a new file (a copy gets
+    a new identity for TCC purposes); editing it in place is fine.
+  - Do this once, with the screen unlocked. See below for why this replaced granting Full
+    Disk Access to Terminal.
 
 
 ## 🔐 Security notes
 
 Read these before copying this setup.
 
-### Full Disk Access is a broad grant
+### Full Disk Access is granted to the script, not Terminal
 The export reads `~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite`,
-which macOS protects. The wrapper obtains access by running under **Terminal.app**, which
-must be granted Full Disk Access.
+which macOS protects. Full Disk Access is granted directly to `run_combined_export.sh`,
+which `launchd` runs directly — no Terminal.app, no AppleScript, in the loop.
 
-Understand what that means: *everything* you subsequently run in Terminal — and anything
-that can drive Terminal via AppleScript — inherits access to all protected data, including
-Mail, Messages, Safari history, and other apps' containers. It is not scoped to this script.
-If that is too broad, grant Full Disk Access to a dedicated wrapper application used only
-for this job instead of to Terminal generally.
+This setup originally ran the export through Terminal.app (granted Full Disk Access) via an
+AppleScript wrapper, `run_with_terminal.sh`, so the export inherited Terminal's grant. That
+broke after a macOS upgrade ("Golden Gate"): Terminal's grant stopped covering a window it
+opened via Apple Event once the screen was locked or asleep, so the 1:30am/5:30am scheduled
+runs failed while manual, screen-unlocked runs kept working. See the 2026-09-26 entry in
+*Status & change history* for the full diagnosis.
+
+Granting Full Disk Access to the script directly is actually **narrower** than the old
+approach, not broader: the old grant to Terminal.app meant *everything* you ran in any
+Terminal window, and anything that could drive Terminal via AppleScript, inherited access to
+all protected data — Mail, Messages, Safari history, every app's container, not just this
+script. A grant to `run_combined_export.sh` covers only that one script.
 
 ### The parser container is pinned and network-isolated
-The container receives a **full copy of your Notes database** on a machine where Terminal
-has Full Disk Access. Two deliberate mitigations:
+The container receives a **full copy of your Notes database** on a machine where the export
+script has Full Disk Access. Two deliberate mitigations:
 
 - **Pinned by digest**, not `:latest`. An unpinned tag means every run trusts whatever the
   registry serves that day. Update the digest as a conscious decision.
@@ -574,12 +618,23 @@ last reboot | head -5                                  # was the Mac off all wee
 ```
 A weekend spent powered off is skipped with no catch-up. See Status & change history above.
 
-### `Operation not permitted` on the `cp`
-The script was run directly instead of through `run_with_terminal.sh`. Full Disk Access is
-inherited from Terminal.app; the wrapper exists solely for that. Always run:
-```bash
-~/NotesIndex/run_with_terminal.sh
-```
+### `Operation not permitted` / `authorization denied` on the `cp`
+Full Disk Access is granted directly to `run_combined_export.sh` (see *Required
+Permissions*). Two distinct causes produce this error, and it matters which one you have:
+
+1. **The grant is missing or was reset**, e.g. after a macOS upgrade. Fix: System Settings ▸
+   Privacy & Security ▸ Full Disk Access ▸ re-add `run_combined_export.sh` by path (or toggle
+   it off and on if it's already listed), then run `~/NotesIndex/run_combined_export.sh`
+   directly to confirm.
+2. **The grant is present, but the screen was locked or asleep** when a `launchd`-triggered
+   run fired. Check `pmset -g log | grep -E "Sleep|Wake|Display is turned"` around the
+   failure time — if the display was off, that is almost certainly it, not a missing grant.
+   A grant made directly to the script (rather than to Terminal.app via an AppleScript
+   wrapper) is not supposed to depend on lock state; if you still see this while the screen
+   is verifiably unlocked and awake, the grant itself needs re-adding (see 1).
+
+`run_with_terminal.sh` no longer has anything to do with permissions; it is an optional,
+manual way to see the export's output in a Terminal window and is not run by `launchd`.
 
 ### Colima won't start: `vz driver is running but host agent is not`
 Stale VM state, usually after an unclean shutdown.
@@ -624,7 +679,7 @@ colima stop --force && colima start --runtime docker --memory 8 --cpu 4
      the old one stays your rollback for as long as upstream keeps that image
      published.
   2. Replace the digest in the `docker run` line of `run_combined_export.sh`.
-  3. Run a manual export: `~/NotesIndex/run_with_terminal.sh`.
+  3. Run a manual export: `~/NotesIndex/run_combined_export.sh`.
   4. Check the results against the previous run *before* leaving it on the
      schedule — a clean exit alone is not enough:
 

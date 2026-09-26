@@ -11,8 +11,8 @@ running under Colima (not Docker Desktop) and scheduled with `launchd`.
 
 | Path | Purpose |
 |---|---|
-| `run_combined_export.sh` | Main script: weekend/cooldown gates, DB copy, parser run, memory sampler, failure alerts |
-| `run_with_terminal.sh` | Wrapper that launches the above via Terminal.app so it inherits **Full Disk Access** |
+| `run_combined_export.sh` | Main script: weekend/cooldown gates, DB copy, parser run, memory sampler, failure alerts. Has **Full Disk Access** granted directly; this is what `launchd` runs |
+| `run_with_terminal.sh` | Legacy manual-run helper that opens the export in a visible Terminal window. Not used by `launchd` and not required for permissions |
 | `test_time_logic.sh` | Exercises the scheduling window logic |
 | `launchd/` | The two LaunchAgents (4-hourly export check; Colima autostart at login) |
 | `docs/` | Canonical documentation |
@@ -29,8 +29,10 @@ tracked files explicitly rather than loosening the ignore rules.
 Read [the security section of the docs](docs/full_notes_export_with_colima.md#-security-notes)
 before copying this setup. In short:
 
-- **Terminal.app needs Full Disk Access**, which is a broad grant — everything you run in
-  Terminal inherits access to all protected data, not just this script.
+- **`run_combined_export.sh` needs Full Disk Access, granted directly to the script** (System
+  Settings ▸ Privacy & Security ▸ Full Disk Access ▸ add the script by path). This is narrower
+  than granting it to Terminal.app, and unlike that approach it also works while the screen is
+  locked or asleep — see the troubleshooting section for why that distinction matters.
 - **The parser image is pinned by digest and run with `--network none`.** It receives a full
   copy of your Notes database; an unpinned tag would mean trusting the registry on every run,
   and no network means a compromised image cannot exfiltrate anything.
@@ -39,7 +41,7 @@ before copying this setup. In short:
 
 ## How it runs
 
-`launchd` fires `run_with_terminal.sh` every 4 hours. The script exits
+`launchd` fires `run_combined_export.sh` directly every 4 hours. The script exits
 immediately unless it is inside the weekend window (Sat 00:00 → Mon 04:59)
 **and** at least 5.25 days have passed since the last *successful* export.
 There is no catch-up: a weekend with the Mac powered off skips that week.

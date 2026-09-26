@@ -8,7 +8,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/<you>/NotesIndex/run_with_terminal.sh</string>
+        <string>/Users/<you>/NotesIndex/run_combined_export.sh</string>
     </array>
 
     <key>StartInterval</key>
