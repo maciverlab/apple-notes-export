@@ -11,8 +11,9 @@ running under Colima (not Docker Desktop) and scheduled with `launchd`.
 
 | Path | Purpose |
 |---|---|
-| `run_combined_export.sh` | Main script: weekend/cooldown gates, DB copy, parser run, memory sampler, failure alerts. Has **Full Disk Access** granted directly; this is what `launchd` runs |
-| `run_with_terminal.sh` | Legacy manual-run helper that opens the export in a visible Terminal window. Not used by `launchd` and not required for permissions |
+| `run_combined_export.sh` | Main script: weekend/cooldown gates, DB copy, parser run, memory sampler, failure alerts |
+| `launcher/` | Source and build script for `notes-export-launcher`, the small compiled program `launchd` runs. It starts `run_combined_export.sh` and holds the **Full Disk Access** grant |
+| `run_with_terminal.sh` | Legacy helper that opens the export in a visible Terminal window. Not used by `launchd` |
 | `test_time_logic.sh` | Exercises the scheduling window logic |
 | `launchd/` | The two LaunchAgents (4-hourly export check; Colima autostart at login) |
 | `docs/` | Canonical documentation |
@@ -29,10 +30,11 @@ tracked files explicitly rather than loosening the ignore rules.
 Read [the security section of the docs](docs/full_notes_export_with_colima.md#-security-notes)
 before copying this setup. In short:
 
-- **`run_combined_export.sh` needs Full Disk Access, granted directly to the script** (System
-  Settings ▸ Privacy & Security ▸ Full Disk Access ▸ add the script by path). This is narrower
-  than granting it to Terminal.app, and unlike that approach it also works while the screen is
-  locked or asleep — see the troubleshooting section for why that distinction matters.
+- **`~/NotesIndex/bin/notes-export-launcher` needs Full Disk Access.** macOS grants file
+  access to the program `launchd` starts, so this small compiled launcher holds the grant and
+  the export script runs under it. A grant on the `.sh` file itself does nothing, because the
+  program actually running is `/bin/bash`. Anyone who can edit `run_combined_export.sh` can
+  run code with that access, so keep the script writable only by you.
 - **The parser image is pinned by digest and run with `--network none`.** It receives a full
   copy of your Notes database; an unpinned tag would mean trusting the registry on every run,
   and no network means a compromised image cannot exfiltrate anything.
@@ -41,7 +43,8 @@ before copying this setup. In short:
 
 ## How it runs
 
-`launchd` fires `run_combined_export.sh` directly every 4 hours. The script exits
+`launchd` fires `bin/notes-export-launcher` every 4 hours, which runs
+`run_combined_export.sh`. The script exits
 immediately unless it is inside the weekend window (Sat 00:00 → Mon 04:59)
 **and** at least 5.25 days have passed since the last *successful* export.
 There is no catch-up: a weekend with the Mac powered off skips that week.

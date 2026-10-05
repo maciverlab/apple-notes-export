@@ -8,7 +8,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/<you>/NotesIndex/run_combined_export.sh</string>
+        <string>/Users/<you>/NotesIndex/bin/notes-export-launcher</string>
     </array>
 
     <key>StartInterval</key>

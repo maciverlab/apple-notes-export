@@ -19,7 +19,29 @@ It is designed to be:
 
 ## ⚠️ Status & change history
 
-**Last verified working: 2026-09-26** (2938 notes, 54 folders).
+**Last verified working: 2026-10-03** (2954 notes, 54 folders), started by `launchd` through
+the launcher with `launchctl kickstart` while the screen was on. A run with the screen locked
+has not been verified yet; the next scheduled weekend run will show it.
+
+### 2026-10-03 — the 2026-09-26 "fix" did not work; launchd now runs a compiled launcher
+The first scheduled run after the 2026-09-26 change failed at the same `cp` with
+`authorization denied`. Running the job with `launchctl kickstart` while the screen was on
+and the user was active failed the same way, so screen state was not the cause.
+
+Root cause: macOS decides Full Disk Access by the *responsible process*, which for a launchd
+job is the program launchd starts. When that program is a shell script, the program actually
+running is `/bin/bash`, so the grant added on `run_combined_export.sh` was never consulted.
+
+The 2026-09-26 "verification" was invalid. It ran the script from an editor session that had
+itself been allowed to read the Notes container, so the editor's permission did the work.
+**Test permission changes with `launchctl kickstart`, never by running the script from a
+terminal or editor**, because those lend their own permissions to the script.
+
+Fix: `launchd` now runs `bin/notes-export-launcher`, a small compiled program built from
+`launcher/`. It spawns `run_combined_export.sh` and waits for it, so it stays the responsible
+process for the export's `sqlite3` and `cp`. Full Disk Access is granted to that binary. The
+launcher is ad-hoc code-signed, and macOS ties the grant to that signature, so **rebuilding
+it requires re-granting**.
 
 ### 2026-09-26 — macOS "Golden Gate" upgrade broke access while locked/asleep
 After updating to macOS Golden Gate, the scheduled 1:30am/5:30am weekend runs failed at the
@@ -34,12 +56,10 @@ itself succeeds and the script runs, but the protected file read is denied until
 active, unlocked session — and with `displaysleep` at 5 minutes, the screen is reliably off
 by the time `launchd`'s 4-hourly interval fires overnight.
 
-Fix: **Full Disk Access is now granted directly to `run_combined_export.sh`** (added by path
-in System Settings, not via Terminal), and the `launchd` job calls that script directly. See
-*Full Disk Access is granted to the script, not Terminal* under Required Permissions, and the
-`Operation not permitted` entry under Troubleshooting. `run_with_terminal.sh` is no longer
-part of the permission chain and is no longer referenced by the LaunchAgent; it is kept only
-as an optional manual helper that opens the export in a visible window.
+Attempted fix (did not work, see 2026-10-03): grant Full Disk Access to
+`run_combined_export.sh` itself and have `launchd` call the script directly. The diagnosis
+above is also suspect, because the "successful" comparison runs it relied on were partly made
+from an editor session with its own access.
 
 Also worth knowing: this was on top of two other post-upgrade issues seen the same week —
 Colima came back from the upgrade in a `Broken` state (`vz driver is running but host agent
@@ -72,7 +92,8 @@ failure alerts (notification + critical modal).
 The gates are a weekend window (Sat 00:00 → Mon 04:59) plus a 5.25-day cooldown, with **no
 catch-up logic**. On one occasion the Mac was powered off for over a week, so that
 weekend was missed entirely and 13 days elapsed between exports. If you are away for a weekend, expect a
-gap and run it manually via `run_combined_export.sh` (or `run_with_terminal.sh` for a visible window).
+gap and run it manually with
+`launchctl kickstart gui/$(id -u)/com.maciver.notes-indexer.colima`.
 
 ### Growth / future OOM risk
 2429 notes (May 2025) → 2904 notes (Aug 2026), roughly 32 notes/month. At 8 GB there is
@@ -84,8 +105,10 @@ at ≥75% a WARNING telling you to raise the VM.
 
 ```bash
 ~/NotesIndex/
-├── run_combined_export.sh         # Main export script; has Full Disk Access granted directly; this is what launchd runs
-├── run_with_terminal.sh           # Legacy manual-run helper (visible Terminal window); not used by launchd, not needed for permissions
+├── run_combined_export.sh         # Main export script; gates, DB copy, parser run
+├── launcher/                      # Source + build.sh for the compiled launcher (tracked)
+├── bin/notes-export-launcher      # Built launcher; launchd runs it; holds Full Disk Access (not tracked)
+├── run_with_terminal.sh           # Legacy visible-Terminal helper; not used by launchd
 ├── NoteStore.sqlite               # Copied Notes database (refreshed weekly after Friday 4am)
 ├── output/                        # Output folder for extracted HTML files
 ~/Library/Logs/
@@ -93,7 +116,7 @@ at ≥75% a WARNING telling you to raise the VM.
 ├── notes-indexer-colima.out      # Colima status log
 ~/Library/LaunchAgents/
 ├── com.maciver.notes-indexer.colima.plist  # LaunchAgent for calling
-run_combined_export.sh directly, every 4 hours
+bin/notes-export-launcher every 4 hours
 ├── com.maciver.colima.autostart.plist      # LaunchAgent for starting Colima on logging in
 ```
 
@@ -444,15 +467,15 @@ chmod +x ~/NotesIndex/run_combined_export.sh
 
 ## Wrapper Script: `run_with_terminal.sh` (legacy, optional)
 
-Full Disk Access is now granted directly to `run_combined_export.sh` (see *Required
-Permissions* below), and `launchd` calls that script directly. This wrapper is **not** part
-of the permission chain any more and is **not** referenced by the LaunchAgent. It is kept
-only so you can open the export in a visible Terminal window for a manual run:
+`launchd` runs the compiled launcher (see *Launcher* below), not this wrapper. It is kept
+only to open the export in a visible Terminal window, and that only works if Terminal still
+has Full Disk Access. For a manual run that uses the launcher's grant, use
+`launchctl kickstart gui/$(id -u)/com.maciver.notes-indexer.colima` instead.
 
 ```bash
 #!/bin/bash
-# LEGACY / NOT USED BY launchd ANY MORE. See docs above and the Status & change
-# history entry for 2026-09-26 for why this stopped being how permissions work.
+# LEGACY / NOT USED BY launchd. See the Status & change history entries for
+# 2026-09-26 and 2026-10-03.
 /usr/bin/osascript -e "tell application \"Terminal\" to do script \"$HOME/NotesIndex/run_combined_export.sh; exit\""
 ```
 
@@ -461,6 +484,23 @@ Make it executable:
 ```bash
 chmod +x ~/NotesIndex/run_with_terminal.sh
 ```
+
+## Launcher: `bin/notes-export-launcher`
+
+A ~60-line C program, `launcher/notes-export-launcher.c`. It looks up your home directory,
+spawns `/bin/bash ~/NotesIndex/run_combined_export.sh`, waits, and returns the script's exit
+code. It exists only so that `launchd` starts a compiled program, which macOS then treats as
+the responsible process for the export. It spawns and waits rather than `exec`ing bash,
+because `exec` would turn the process back into `/bin/bash` in macOS's eyes.
+
+Build and sign it:
+
+```bash
+~/NotesIndex/launcher/build.sh
+```
+
+Then grant it Full Disk Access (see *Required Permissions*). Rebuilding changes its
+signature and invalidates the grant, so remove the old entry and add it again after a rebuild.
 
 
 
@@ -479,7 +519,7 @@ chmod +x ~/NotesIndex/run_with_terminal.sh
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/<you>/NotesIndex/run_combined_export.sh</string>
+        <string>/Users/<you>/NotesIndex/bin/notes-export-launcher</string>
     </array>
 
     <key>StartInterval</key>
@@ -534,24 +574,26 @@ adopt this setup, rename them to your own namespace — the label must match the
 
 ## 🛡️ Required Permissions
 
-- **`run_combined_export.sh` must be granted Full Disk Access directly** (not Terminal.app):
-  - System Settings ▸ Privacy & Security ▸ Full Disk Access ▸ **+** ▸ navigate to
-    `~/NotesIndex/run_combined_export.sh` (Cmd+Shift+G in the file picker to type the path,
-    since it isn't an app) ▸ add it ▸ toggle it **on**.
-  - This must be redone if the script is ever moved or replaced with a new file (a copy gets
-    a new identity for TCC purposes); editing it in place is fine.
-  - Do this once, with the screen unlocked. See below for why this replaced granting Full
-    Disk Access to Terminal.
+- **`~/NotesIndex/bin/notes-export-launcher` must be granted Full Disk Access:**
+  - System Settings ▸ Privacy & Security ▸ Full Disk Access ▸ **+** ▸ press Cmd+Shift+G and
+    type `~/NotesIndex/bin/notes-export-launcher` ▸ add it ▸ make sure it is toggled **on**.
+  - Redo this after every rebuild of the launcher; the grant is tied to its signature.
+  - Confirm with `launchctl kickstart gui/$(id -u)/com.maciver.notes-indexer.colima`, not by
+    running the script from a terminal, which would lend it the terminal's permissions.
+- A Full Disk Access entry for `run_combined_export.sh` has no effect and can be removed.
+- Terminal.app no longer needs Full Disk Access for this job. Keep it only if you use
+  `run_with_terminal.sh` or want it for other reasons.
 
 
 ## 🔐 Security notes
 
 Read these before copying this setup.
 
-### Full Disk Access is granted to the script, not Terminal
+### Full Disk Access is granted to a dedicated launcher, not Terminal
 The export reads `~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite`,
-which macOS protects. Full Disk Access is granted directly to `run_combined_export.sh`,
-which `launchd` runs directly — no Terminal.app, no AppleScript, in the loop.
+which macOS protects. Full Disk Access is granted to `bin/notes-export-launcher`, which
+`launchd` runs and which runs `run_combined_export.sh`. No Terminal.app or AppleScript is
+involved.
 
 This setup originally ran the export through Terminal.app (granted Full Disk Access) via an
 AppleScript wrapper, `run_with_terminal.sh`, so the export inherited Terminal's grant. That
@@ -560,11 +602,15 @@ opened via Apple Event once the screen was locked or asleep, so the 1:30am/5:30a
 runs failed while manual, screen-unlocked runs kept working. See the 2026-09-26 entry in
 *Status & change history* for the full diagnosis.
 
-Granting Full Disk Access to the script directly is actually **narrower** than the old
-approach, not broader: the old grant to Terminal.app meant *everything* you ran in any
-Terminal window, and anything that could drive Terminal via AppleScript, inherited access to
-all protected data — Mail, Messages, Safari history, every app's container, not just this
-script. A grant to `run_combined_export.sh` covers only that one script.
+A first replacement, granting access to the `.sh` file itself, did not work; see the
+2026-10-03 entry.
+
+The launcher grant is **narrower** than the old Terminal grant, under which everything run
+in any Terminal window, and anything that could drive Terminal via AppleScript, had access to
+all protected data. It is not airtight: the launcher runs whatever `run_combined_export.sh`
+contains, so anything that can edit that script can run code with Full Disk Access when the
+job next fires. Keep `~/NotesIndex` writable only by your account. Replacing the launcher
+binary itself is safe, because a new binary has a new signature and loses the grant.
 
 ### The parser container is pinned and network-isolated
 The container receives a **full copy of your Notes database** on a machine where the export
@@ -619,22 +665,20 @@ last reboot | head -5                                  # was the Mac off all wee
 A weekend spent powered off is skipped with no catch-up. See Status & change history above.
 
 ### `Operation not permitted` / `authorization denied` on the `cp`
-Full Disk Access is granted directly to `run_combined_export.sh` (see *Required
-Permissions*). Two distinct causes produce this error, and it matters which one you have:
+The launcher's Full Disk Access grant is missing, off, or stale. Likely causes: a macOS
+upgrade reset it, or the launcher was rebuilt, which changes its signature.
 
-1. **The grant is missing or was reset**, e.g. after a macOS upgrade. Fix: System Settings ▸
-   Privacy & Security ▸ Full Disk Access ▸ re-add `run_combined_export.sh` by path (or toggle
-   it off and on if it's already listed), then run `~/NotesIndex/run_combined_export.sh`
-   directly to confirm.
-2. **The grant is present, but the screen was locked or asleep** when a `launchd`-triggered
-   run fired. Check `pmset -g log | grep -E "Sleep|Wake|Display is turned"` around the
-   failure time — if the display was off, that is almost certainly it, not a missing grant.
-   A grant made directly to the script (rather than to Terminal.app via an AppleScript
-   wrapper) is not supposed to depend on lock state; if you still see this while the screen
-   is verifiably unlocked and awake, the grant itself needs re-adding (see 1).
+1. Check the LaunchAgent runs the launcher:
+   `plutil -p ~/Library/LaunchAgents/com.maciver.notes-indexer.colima.plist`.
+2. System Settings ▸ Privacy & Security ▸ Full Disk Access: remove any
+   `notes-export-launcher` entry, add `~/NotesIndex/bin/notes-export-launcher` again, and make
+   sure it is on.
+3. Test with `launchctl kickstart gui/$(id -u)/com.maciver.notes-indexer.colima` and read the
+   log.
 
-`run_with_terminal.sh` no longer has anything to do with permissions; it is an optional,
-manual way to see the export's output in a Terminal window and is not run by `launchd`.
+Do not test by running `run_combined_export.sh` from Terminal or an editor. The run then uses
+that app's permissions, so it can succeed while the scheduled job still fails. That mistake
+produced the false "fixed" result on 2026-09-26.
 
 ### Colima won't start: `vz driver is running but host agent is not`
 Stale VM state, usually after an unclean shutdown.
